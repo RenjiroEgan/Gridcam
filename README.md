@@ -29,7 +29,7 @@ stateDiagram-v2
 
 | State | What Happens |
 |---|---|
-| 0 to 10s (Live) | Live camera feed. A countdown appears in the center during the last 5 seconds. The green bounding box tracks your fingertips. |
+| 0 to 10s (Live) | Live camera feed. A countdown appears in the center during the last 5 seconds. The orange bounding box tracks your fingertips. |
 | 10s+ (Frozen) | The background outside the grid freezes indefinitely. Inside the grid remains live (Picture in Picture). |
 | Capture (SPACE) | While frozen, press SPACE to capture the photo. A flash animation plays, the image with the grid is saved to the Results Test folder, and the 10s cycle restarts immediately. |
 

@@ -145,7 +145,7 @@ def composite_live_roi(frozen_bg, live_frame, locked_bbox):
     # Draw border around the live ROI to emphasize it
     cv2.rectangle(
         composite, (x_min, y_min), (x_max, y_max),
-        COLOR_ORANGE, BOX_THICKNESS
+        COLOR_GREEN, BOX_THICKNESS
     )
 
     return composite
@@ -266,7 +266,7 @@ def run_gridcam():
                     x_min, y_min, x_max, y_max = last_known_bbox
                     cv2.rectangle(
                         display_frame, (x_min, y_min), (x_max, y_max),
-                        COLOR_GREEN, BOX_THICKNESS
+                        COLOR_ORANGE, BOX_THICKNESS
                     )
                 
                 # Center Countdown ONLY in the last 5 seconds
