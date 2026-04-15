@@ -36,3 +36,6 @@ desktop.ini
 .gemini/
 .claude/
 skills-lock.json
+
+# Captured test results
+Results Test/

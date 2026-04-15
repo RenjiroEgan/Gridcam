@@ -1,60 +1,52 @@
-# 🎥 Gridcam — 30-Second Cyclic Camera State Machine
+# Gridcam Photo Capture with Dual Hand Tracking
 
-A Python application using **OpenCV** and **MediaPipe Hands** that tracks both hands to define a bounding box grid, then composites a live Region of Interest onto a frozen background in a 30-second cycle.
-
----
+A Python application using OpenCV and MediaPipe Hands that tracks both hands to define a bounding box grid on your live webcam feed. 
 
 ## How It Works
 
-Gridcam runs a continuous **30-second loop** with two states:
+Gridcam runs in cycles consisting of a live countdown, a freeze state with Picture in Picture, and a capture phase.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> LiveFeed: t = 0s
-    LiveFeed --> Snapshot: t = 15s (freeze!)
-    Snapshot --> PiPOverlay: background + box locked
-    PiPOverlay --> LiveFeed: t = 30s (reset!)
+    [*] --> LiveTracking: Cycle Starts
+    LiveTracking --> FrozenState: 10 seconds elapse
+    FrozenState --> Capture: SPACE pressed
+    Capture --> [*]: Saves image, flashes, and restarts Cycle
 
-    state LiveFeed {
-        [*] --> CaptureFrame
-        CaptureFrame --> DetectBothHands
-        DetectBothHands --> CollectFingertips
-        CollectFingertips --> ComputeBBox
-        ComputeBBox --> DrawGreenBox
-        DrawGreenBox --> DisplayFrame
+    state LiveTracking {
+        [*] --> ReadFrame
+        ReadFrame --> DetectHands
+        DetectHands --> UpdateBBox
+        UpdateBBox --> DrawGridAndCountdown
+        DrawGridAndCountdown --> Display
     }
 
-    state PiPOverlay {
-        [*] --> CaptureFrame2
-        CaptureFrame2 --> ExtractLiveROI
-        ExtractLiveROI --> CompositeOnFrozenBG
-        CompositeOnFrozenBG --> DisplayComposite
+    state FrozenState {
+        [*] --> PiP
+        PiP --> DisplayComposite
     }
 ```
 
-| Time | State | What You See |
-|---|---|---|
-| **0–15s** | Live Feed | Your webcam with a green bounding box tracking your fingertips |
-| **At 15s** | Transition | Background freezes, bounding box coordinates lock |
-| **15–30s** | PiP Overlay | Frozen background with your live hand composited inside the locked box |
-| **At 30s** | Reset | Cycle restarts from the beginning |
+| State | What Happens |
+|---|---|
+| 0 to 10s (Live) | Live camera feed. A countdown appears in the center during the last 5 seconds. The green bounding box tracks your fingertips. |
+| 10s+ (Frozen) | The background outside the grid freezes indefinitely. Inside the grid remains live (Picture in Picture). |
+| Capture (SPACE) | While frozen, press SPACE to capture the photo. A flash animation plays, the image with the grid is saved to the Results Test folder, and the 10s cycle restarts immediately. |
 
----
+## Dual Hand Tracking
 
-## Dual-Hand Tracking
-
-Gridcam tracks **both hands simultaneously** using thumb tip (Landmark 4) and index finger tip (Landmark 8) from each hand:
+Gridcam tracks thumb tip (Landmark 4) and index finger tip (Landmark 8) from both hands to define the bounding box:
 
 ```mermaid
 flowchart LR
     subgraph Hand1["Left Hand"]
-        T1["👆 Thumb Tip (L4)"]
-        I1["👆 Index Tip (L8)"]
+        T1["Thumb Tip (L4)"]
+        I1["Index Tip (L8)"]
     end
 
     subgraph Hand2["Right Hand"]
-        T2["👆 Thumb Tip (L4)"]
-        I2["👆 Index Tip (L8)"]
+        T2["Thumb Tip (L4)"]
+        I2["Index Tip (L8)"]
     end
 
     T1 & I1 & T2 & I2 --> Collect["Collect All Points"]
@@ -62,16 +54,11 @@ flowchart LR
     BBox --> Clamp["Clamp to\nFrame Edges"]
 ```
 
-- **1 hand** → small box around your thumb + index finger
-- **2 hands** → large grid spanning both hands (each hand acts as a corner)
-
----
-
 ## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Core["Core Tracking (Phase 2)"]
+    subgraph Tracking["Core Tracking"]
         EFL["extract_finger_landmarks()"] --> CAF["collect_all_fingertips()"]
         CAF --> CPB["compute_padded_bounding_box()"]
         CPB --> IVB["is_valid_bounding_box()"]
@@ -79,37 +66,37 @@ flowchart TD
 
     subgraph Detection["Hand Detection"]
         CHL["create_hand_landmarker()"] --> DAH["detect_all_hands()"]
-        DAH -->|"hand_landmarks[]"| EFL
+        DAH -->|hand_landmarks| EFL
     end
 
-    subgraph StateMachine["State Machine (Phase 3)"]
-        DTO["draw_tracking_overlay()"]
-        CLR["composite_live_roi()"]
-        CSB["create_status_bar()"]
-        RG["run_gridcam()"]
+    subgraph Capture["Photo Capture"]
+        SC["save_capture()"] --> ERD["ensure_results_directory()"]
+        AFO["apply_flash_overlay()"]
     end
 
-    IVB --> DTO
-    IVB --> CLR
+    IVB --> RG["run_gridcam()"]
+    RG -->|SPACE pressed| SC
+    RG -->|flash active| AFO
 ```
 
-| Function | Responsibility | Lines |
-|---|---|---|
-| `extract_finger_landmarks()` | Reads Landmark 4 & 8 from one hand | ~10 |
-| `collect_all_fingertips()` | Gathers tips from all detected hands | ~12 |
-| `compute_padded_bounding_box()` | Min/max of all points + 10% padding, clamped | ~15 |
-| `is_valid_bounding_box()` | Guards against zero-area boxes | ~3 |
-| `create_hand_landmarker()` | Configures MediaPipe Tasks API (VIDEO mode, 2 hands) | ~12 |
-| `detect_all_hands()` | Runs detection, returns all hand landmarks | ~10 |
-
----
+| Function | What It Does |
+|---|---|
+| `extract_finger_landmarks()` | Reads Landmark 4 and 8 from one hand |
+| `collect_all_fingertips()` | Gathers tips from all detected hands |
+| `compute_padded_bounding_box()` | Min/max of all points + 10% padding, clamped to frame |
+| `is_valid_bounding_box()` | Guards against zero area boxes |
+| `create_hand_landmarker()` | Configures MediaPipe Tasks API (VIDEO mode, 2 hands) |
+| `detect_all_hands()` | Runs detection, returns all hand landmarks |
+| `save_capture()` | Saves the frame as PNG to Results Test folder |
+| `apply_flash_overlay()` | White flash effect that fades over several frames |
+| `run_gridcam()` | Main loop with 10s tracking, freeze, capture, and flash |
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.10+
-- Webcam connected to your machine
+* Python 3.10+
+* Webcam connected to your machine
 
 ### Installation
 
@@ -139,55 +126,6 @@ python main.py
 
 | Key | Action |
 |---|---|
-| `q` | Quit the application |
-| `ESC` | Quit the application |
-
----
-
-## Project Plan
-
-### Phase Status
-
-| Phase | Description | Status |
-|---|---|---|
-| **Phase 1** | Environment Setup (`requirements.txt`, model download) | ✅ Complete |
-| **Phase 2** | Core Tracking Logic (dual-hand, bounding box, validation) | ✅ Complete |
-| **Phase 3** | Temporal State Machine (30s cycle, freeze, PiP compositing) | ✅ Complete |
-| **Phase 4** | Documentation (this README) | ✅ Complete |
-| **Phase 5** | Verification (85+ second run, error-free confirmation) | ✅ Complete |
-
-### Temporal State Machine Logic (Phase 3)
-
-```
-elapsed = time.time() - cycle_start
-
-if elapsed >= 30s           → RESET cycle
-elif elapsed < 15s          → STATE A: live feed + green tracking box
-elif frozen_bg is None      → TRANSITION: freeze background + lock box (once)
-else                        → STATE B: frozen bg + live ROI composite
-```
-
-### Matrix Slicing for PiP Compositing (Phase 3)
-
-```python
-composite = frozen_bg.copy()
-composite[y_min:y_max, x_min:x_max] = live_frame[y_min:y_max, x_min:x_max]
-```
-
-Both slices use the same locked coordinates, so dimensions always match — no `ValueError` possible.
-
----
-
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| `opencv-python` | Camera capture, frame rendering, window display |
-| `mediapipe` | Hand landmark detection (Tasks API) |
-| `numpy` | Image array operations |
-
----
-
-## License
-
-MIT
+| SPACE | Capture photo during the Frozen State |
+| q | Quit |
+| ESC | Quit |
