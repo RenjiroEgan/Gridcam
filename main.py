@@ -1,15 +1,3 @@
-"""
-Project Gridcam -- Photo Capture with Dual-Hand Tracking & PiP
-
-Cycle Flow:
-1. Live Tracking (0-10s): Normal camera feed, tracks both hands to draw a dynamic polygon grid.
-   Displays a countdown in the center for the final 5 seconds.
-2. Freeze State (10s+): Background freezes. Polygon coordinates lock.
-   Inside the polygon is a live video feed (PiP).
-3. Capture (SPACE): Pressing SPACE during the freeze state captures the photo,
-   applies a flash animation, saves it to 'Results Test', and restarts the cycle.
-"""
-
 import os
 import math
 import time
@@ -219,15 +207,16 @@ def save_capture(frame, capture_number):
     return filepath
 
 
-def draw_centered_text(frame, text, font=cv2.FONT_HERSHEY_SIMPLEX, scale=3, thickness=4, color=(255, 255, 255)):
-    """Draw text perfectly centered on the given frame."""
+def draw_bottom_right_text(frame, text, font=cv2.FONT_HERSHEY_SIMPLEX, scale=3, thickness=4, color=(255, 255, 255)):
+    """Draw text on the bottom right of the given frame."""
     frame_height, frame_width = frame.shape[:2]
     # Get text size
     (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
     
-    # Calculate center position
-    x = (frame_width - text_width) // 2
-    y = (frame_height + text_height) // 2
+    # Calculate bottom right position
+    margin = 30
+    x = frame_width - text_width - margin
+    y = frame_height - margin
     
     # Draw outline for better visibility
     cv2.putText(frame, text, (x, y), font, scale, (0, 0, 0), thickness + 2)
@@ -315,9 +304,9 @@ def run_gridcam():
                         for p in last_known_points:
                             cv2.circle(display_frame, p, 5, COLOR_CYAN, -1)
                 
-                # Center Countdown ONLY in the last 5 seconds
+                # Bottom right Countdown ONLY in the last 5 seconds
                 if remaining <= 5:
-                    draw_centered_text(display_frame, f"{int(remaining)+1}")
+                    draw_bottom_right_text(display_frame, f"{int(remaining)+1}")
 
                 if elapsed >= LIVE_DURATION_SECONDS:
                     # Time's up! Transition to FROZEN
