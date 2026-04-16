@@ -2,15 +2,16 @@
 Project Gridcam -- Photo Capture with Dual-Hand Tracking & PiP
 
 Cycle Flow:
-1. Live Tracking (0-10s): Normal camera feed, tracks both hands to draw a clean grid box.
+1. Live Tracking (0-10s): Normal camera feed, tracks both hands to draw a dynamic polygon grid.
    Displays a countdown in the center for the final 5 seconds.
-2. Freeze State (10s+): Background freezes. Bounding box coordinates lock.
-   Inside the box is a live video feed (PiP).
+2. Freeze State (10s+): Background freezes. Polygon coordinates lock.
+   Inside the polygon is a live video feed (PiP).
 3. Capture (SPACE): Pressing SPACE during the freeze state captures the photo,
    applies a flash animation, saves it to 'Results Test', and restarts the cycle.
 """
 
 import os
+import math
 import time
 
 import cv2
@@ -32,6 +33,7 @@ INDEX_FINGER_TIP_INDEX = 8
 COLOR_GREEN = (0, 255, 0)
 COLOR_ORANGE = (0, 165, 255)
 COLOR_WHITE = (255, 255, 255)
+COLOR_CYAN = (255, 255, 0)
 BOX_THICKNESS = 2
 
 MODEL_PATH = os.path.join(
@@ -71,29 +73,72 @@ def collect_all_fingertips(all_hand_landmarks, frame_width, frame_height):
     return points
 
 
-def compute_padded_bounding_box(fingertip_points, frame_width, frame_height):
-    """Calculate a bounding box with 10% padding, clamped to frame edges."""
-    x_coords = [p[0] for p in fingertip_points]
-    y_coords = [p[1] for p in fingertip_points]
+def compute_dynamic_polygon(fingertip_points, frame_width, frame_height):
+    """Calculate a dynamic polygon (quadrilateral) from fingertip points."""
+    if len(fingertip_points) < 3:
+        # Fallback to an axis-aligned box for 1 hand (2 points)
+        x_coords = [p[0] for p in fingertip_points]
+        y_coords = [p[1] for p in fingertip_points]
+        
+        x_min_raw, x_max_raw = min(x_coords), max(x_coords)
+        y_min_raw, y_max_raw = min(y_coords), max(y_coords)
 
-    x_min_raw, x_max_raw = min(x_coords), max(x_coords)
-    y_min_raw, y_max_raw = min(y_coords), max(y_coords)
+        # Enforce minimum size to avoid flat lines
+        if x_max_raw - x_min_raw < 10:
+            x_min_raw -= 5; x_max_raw += 5
+        if y_max_raw - y_min_raw < 10:
+            y_min_raw -= 5; y_max_raw += 5
 
-    pad_x = int((x_max_raw - x_min_raw) * BBOX_PADDING_RATIO)
-    pad_y = int((y_max_raw - y_min_raw) * BBOX_PADDING_RATIO)
+        pad_x = int((x_max_raw - x_min_raw) * BBOX_PADDING_RATIO)
+        pad_y = int((y_max_raw - y_min_raw) * BBOX_PADDING_RATIO)
 
-    x_min = max(0, x_min_raw - pad_x)
-    y_min = max(0, y_min_raw - pad_y)
-    x_max = min(frame_width, x_max_raw + pad_x)
-    y_max = min(frame_height, y_max_raw + pad_y)
+        x_min = max(0, x_min_raw - pad_x)
+        y_min = max(0, y_min_raw - pad_y)
+        x_max = min(frame_width, x_max_raw + pad_x)
+        y_max = min(frame_height, y_max_raw + pad_y)
 
-    return x_min, y_min, x_max, y_max
+        return np.array([
+            [x_min, y_min],
+            [x_max, y_min],
+            [x_max, y_max],
+            [x_min, y_max]
+        ], dtype=np.int32)
+    
+    # For 2 hands (4 points), order them cyclically to form a convex polygon
+    centroid_x = sum(p[0] for p in fingertip_points) / len(fingertip_points)
+    centroid_y = sum(p[1] for p in fingertip_points) / len(fingertip_points)
+
+    def angle_from_centroid(p):
+        return math.atan2(p[1] - centroid_y, p[0] - centroid_x)
+
+    ordered_points = sorted(fingertip_points, key=angle_from_centroid)
+
+    # Pad outward from the centroid
+    padded_polygon = []
+    for p in ordered_points:
+        dx = p[0] - centroid_x
+        dy = p[1] - centroid_y
+        
+        # Apply padding ratio
+        new_x = int(centroid_x + dx * (1.0 + BBOX_PADDING_RATIO * 1.5)) 
+        new_y = int(centroid_y + dy * (1.0 + BBOX_PADDING_RATIO * 1.5))
+        
+        # Clamp to frame edges
+        new_x = max(0, min(frame_width - 1, new_x))
+        new_y = max(0, min(frame_height - 1, new_y))
+        
+        padded_polygon.append([new_x, new_y])
+        
+    return np.array(padded_polygon, dtype=np.int32)
 
 
-def is_valid_bounding_box(bbox):
-    """Check that the bounding box has non-zero area."""
-    x_min, y_min, x_max, y_max = bbox
-    return (x_max - x_min) > 0 and (y_max - y_min) > 0
+def is_valid_polygon(polygon):
+    """Check that the polygon has a valid area."""
+    if polygon is None or len(polygon) < 3:
+        return False
+    # Use bounding rectangle width/height to quickly check validity
+    x, y, w, h = cv2.boundingRect(polygon)
+    return w > 0 and h > 0
 
 
 def create_hand_landmarker():
@@ -131,21 +176,22 @@ def detect_all_hands(landmarker, frame, timestamp_ms):
 # State visualizers and Capture
 # ---------------------------------------------------------------------------
 
-def composite_live_roi(frozen_bg, live_frame, locked_bbox):
-    """Paste the live ROI onto the frozen background."""
-    x_min, y_min, x_max, y_max = locked_bbox
+def composite_live_roi(frozen_bg, live_frame, locked_polygon):
+    """Paste the live ROI onto the frozen background using a dynamic polygon mask."""
     composite = frozen_bg.copy()
     
-    # Check bounds again just to be 100% safe to prevent slicing errors
-    y_max = min(y_max, frozen_bg.shape[0])
-    x_max = min(x_max, frozen_bg.shape[1])
+    # Create mask for the exact dynamic polygon area
+    mask = np.zeros(composite.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [locked_polygon], 255)
     
-    composite[y_min:y_max, x_min:x_max] = live_frame[y_min:y_max, x_min:x_max]
+    # Expand dims for channel broadcasting and apply composite
+    mask_bool = mask[:, :, None] == 255
+    composite = np.where(mask_bool, live_frame, composite)
 
-    # Draw border around the live ROI to emphasize it
-    cv2.rectangle(
-        composite, (x_min, y_min), (x_max, y_max),
-        COLOR_GREEN, BOX_THICKNESS
+    # Draw border around the live ROI to emphasize the portal
+    cv2.polylines(
+        composite, [locked_polygon], isClosed=True,
+        color=COLOR_GREEN, thickness=BOX_THICKNESS
     )
 
     return composite
@@ -209,12 +255,12 @@ def run_gridcam():
     frame_start_ms = int(time.time() * 1000)
 
     # State Variables
-    # State can be 'LIVE' or 'FROZEN'
     state = 'LIVE'
     cycle_start = time.time()
     
-    last_known_bbox = None
-    locked_bbox = None
+    last_known_poly = None
+    last_known_points = None
+    locked_poly = None
     frozen_background = None
     capture_count = 0
 
@@ -231,8 +277,7 @@ def run_gridcam():
             timestamp_ms = current_ms - frame_start_ms
 
             # ---------------------------------------------------------
-            # 1. ALWAYS RUN HAND DETECTION for tracking OR for PiP box update
-            # (Though in frozen state, the bbox is locked)
+            # 1. ALWAYS RUN HAND DETECTION for tracking
             # ---------------------------------------------------------
             all_hands = detect_all_hands(landmarker, frame, timestamp_ms)
 
@@ -241,16 +286,15 @@ def run_gridcam():
                     fingertip_points = collect_all_fingertips(
                         all_hands, frame_width, frame_height
                     )
-                    bbox = compute_padded_bounding_box(
+                    poly = compute_dynamic_polygon(
                         fingertip_points, frame_width, frame_height
                     )
-                    if is_valid_bounding_box(bbox):
-                        last_known_bbox = bbox
-            else:
-                # Optional: Handle things if we want live tracking inside PiP?
-                # User asked that "where inside the box I can still move around"
-                # so the box itself is locked but the user sees their live camera feed inside it.
-                pass
+                    if is_valid_polygon(poly):
+                        last_known_poly = poly
+                        last_known_points = fingertip_points
+                else:
+                    last_known_poly = None
+                    last_known_points = None
 
             # ---------------------------------------------------------
             # 2. STATE LOGIC & RENDERING
@@ -261,13 +305,15 @@ def run_gridcam():
                 elapsed = time.time() - cycle_start
                 remaining = max(0.0, LIVE_DURATION_SECONDS - elapsed)
 
-                # Draw the grid if tracked
-                if last_known_bbox is not None:
-                    x_min, y_min, x_max, y_max = last_known_bbox
-                    cv2.rectangle(
-                        display_frame, (x_min, y_min), (x_max, y_max),
-                        COLOR_ORANGE, BOX_THICKNESS
+                # Draw the dynamic grid and finger dots if tracked
+                if last_known_poly is not None:
+                    cv2.polylines(
+                        display_frame, [last_known_poly], isClosed=True,
+                        color=COLOR_ORANGE, thickness=BOX_THICKNESS
                     )
+                    if last_known_points is not None:
+                        for p in last_known_points:
+                            cv2.circle(display_frame, p, 5, COLOR_CYAN, -1)
                 
                 # Center Countdown ONLY in the last 5 seconds
                 if remaining <= 5:
@@ -278,22 +324,25 @@ def run_gridcam():
                     state = 'FROZEN'
                     frozen_background = frame.copy()
                     
-                    if last_known_bbox is not None:
-                        locked_bbox = last_known_bbox
-                        print(f"[INFO] Freezing! Box locked: {locked_bbox}")
+                    if last_known_poly is not None:
+                        locked_poly = last_known_poly
+                        print(f"[INFO] Freezing! Polygon locked.")
                     else:
-                        # Fallback box if no hand was present
+                        # Fallback box if no hands were present
                         margin_x = frame_width // 4
                         margin_y = frame_height // 4
-                        locked_bbox = (margin_x, margin_y, 
-                                       frame_width - margin_x, 
-                                       frame_height - margin_y)
+                        locked_poly = np.array([
+                            [margin_x, margin_y],
+                            [frame_width - margin_x, margin_y],
+                            [frame_width - margin_x, frame_height - margin_y],
+                            [margin_x, frame_height - margin_y]
+                        ], dtype=np.int32)
                         print("[WARN] No hands. Using fallback freeze box.")
 
             elif state == 'FROZEN':
-                # Background is frozen, inside locked_bbox is live feed
+                # Background is frozen, inside locked_poly is live feed
                 display_frame = composite_live_roi(
-                    frozen_background, frame, locked_bbox
+                    frozen_background, frame, locked_poly
                 )
 
             # ---------------------------------------------------------
@@ -326,7 +375,7 @@ def run_gridcam():
                 print("[INFO] Restarting 10-second cycle.")
                 state = 'LIVE'
                 cycle_start = time.time()
-                last_known_bbox = None
+                last_known_poly = None
 
             # Quit
             if key == ord('q') or key == 27:
